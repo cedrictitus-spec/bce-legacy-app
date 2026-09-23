@@ -3,20 +3,43 @@ from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
 import os
 from datetime import datetime
-from azure_connection import get_database_url
+from azure.identity import DefaultAzureCredential
+from azure.keyvault.secrets import SecretClient
+from urllib.parse import quote_plus
 app = Flask(__name__)
 # Local training placeholder. Configure a private secret before deployment.
-app.config['SECRET_KEY'] = 'your-secret-key-change-this-in-production'
-app.config['SQLALCHEMY_DATABASE_URI'] = get_database_url()
-app.config['SQLALCHEMY_ECHO'] = False
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-    'pool_pre_ping': True,
-    'hide_parameters': True,
+app.config["SECRET_KEY"] = os.environ["FLASK_SECRET_KEY"]
+KEY_VAULT_NAME = os.environ.get("KEY_VAULT_NAME")
+SECRET_NAME = "sql-connection-passwordless"
+
+
+def get_connection_string():
+    """Read the passwordless SQL connection string from Key Vault."""
+    if not KEY_VAULT_NAME:
+        raise RuntimeError("KEY_VAULT_NAME is not configured.")
+
+    vault_url = f"https://{KEY_VAULT_NAME}.vault.azure.net"
+    credential = DefaultAzureCredential()
+    client = SecretClient(
+        vault_url=vault_url,
+        credential=credential,
+    )
+    return client.get_secret(SECRET_NAME).value
+
+
+odbc_str = get_connection_string()
+
+app.config["SQLALCHEMY_DATABASE_URI"] = (
+    "mssql+pyodbc:///?odbc_connect=" + quote_plus(odbc_str)
+)
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+app.config["SQLALCHEMY_ECHO"] = False
+app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
+    "pool_pre_ping": True,
+    "hide_parameters": True,
 }
 
 db = SQLAlchemy(app)
-
 
 # User model
 class User(db.Model):
@@ -33,9 +56,7 @@ class User(db.Model):
         return check_password_hash(self.password, password)
 
 
-# Create database tables when this module is run or imported.
-with app.app_context():
-    db.create_all()
+
 
 
 # Routes
@@ -97,10 +118,10 @@ def create_user():
     new_user.set_password(password)
     db.session.add(new_user)
     db.session.commit()
-
     return redirect('/dashboard')
 
 
+    
 if __name__ == '__main__':
     # Use the development server and debugger for local practice only.
     app.run(debug=True, host='localhost', port=5000)
