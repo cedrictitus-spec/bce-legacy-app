@@ -1,0 +1,158 @@
+// BCE Club — saved monitoring and customer-journey queries
+// Author: Cedric Titus | Evidence date: 2026-09-28
+// Run in Log Analytics workspace: bce-security-logs.
+// Select ONE complete query block at a time, then click Run.
+// Use a portal time range that includes the dates in the selected query.
+// Queries 1–5 use the last seven days. Queries 6–11 use fixed lab dates (UTC).
+// These queries read existing logs; they do not create alerts or change resources.
+
+// 1. Which requests did the WAF block?
+// A row is a firewall log event, not proof of a successful attack.
+AzureDiagnostics
+| where TimeGenerated > ago(7d)
+| where Category == "ApplicationGatewayFirewallLog"
+| where action_s == "Blocked"
+| project TimeGenerated, clientIp_s, requestUri_s, ruleId_s, Message
+| sort by TimeGenerated desc
+
+// 2. When was the login form submitted?
+// HTTP status alone does not establish whether a password was correct.
+AppServiceHTTPLogs
+| where TimeGenerated > ago(7d)
+| where CsMethod == "POST"
+| where CsUriStem contains "login"
+| project TimeGenerated, CIp, CsUriStem, ScStatus, TimeTaken
+| sort by TimeGenerated desc
+
+// 3. Was direct access to App Service denied?
+// Access-restriction rejections are recorded in this audit table.
+AppServiceIPSecAuditLogs
+| where TimeGenerated > ago(7d)
+| where Result =~ "Denied"
+| project TimeGenerated, CIp, Result, Details
+| sort by TimeGenerated desc
+
+// 4. What activity reached Key Vault?
+// SecretGet identifies secret retrieval; VaultGet alone does not.
+AzureDiagnostics
+| where TimeGenerated > ago(7d)
+| where ResourceType == "VAULTS"
+| project TimeGenerated, OperationName, ResultType, CallerIPAddress
+| sort by TimeGenerated desc
+
+// 5. Who changed the Azure environment?
+// Compare callers and write/delete operations with approved work.
+AzureActivity
+| where TimeGenerated > ago(7d)
+| where OperationNameValue contains "write"
+    or OperationNameValue contains "delete"
+| project TimeGenerated, Caller, OperationNameValue,
+          ResourceGroup, ActivityStatusValue
+| sort by TimeGenerated desc
+| take 50
+
+// 6. Customer trace — gateway POST requests, including login and create-user.
+// Lab evidence: POST /admin/create-user at 2026-09-28 00:26:24 UTC, HTTP 302.
+// Application Gateway v2 timeTaken_d is in SECONDS: observed 0.762 seconds.
+// The transaction ID joins the gateway access event to its WAF event.
+AzureDiagnostics
+| where TimeGenerated between
+    (datetime(2026-09-28T00:20:00Z) .. datetime(2026-09-28T00:35:00Z))
+| where Category == "ApplicationGatewayAccessLog"
+| where Resource =~ "bce-appgw"
+| where httpMethod_s == "POST"
+| extend TransactionID = coalesce(
+    tostring(column_ifexists("transactionId_g", "")),
+    tostring(column_ifexists("transactionId_s", "")))
+| project TimeGenerated, ClientIP = clientIp_s, Method = httpMethod_s,
+          Path = requestUri_s, HTTPStatus = httpStatus_d,
+          DurationSeconds = timeTaken_d, TransactionID
+| sort by TimeGenerated asc
+
+// 7. Customer trace — WAF event for the SAME gateway transaction.
+// Observed action: Matched, rule 920350, "Host header is a numeric IP address".
+// Matched is not the same as Blocked. This query includes every recorded action
+// for the transaction rather than filtering out a possible block.
+AzureDiagnostics
+| where TimeGenerated between
+    (datetime(2026-09-28T00:20:00Z) .. datetime(2026-09-28T00:35:00Z))
+| where Category == "ApplicationGatewayFirewallLog"
+| where Resource =~ "bce-appgw"
+| extend TransactionID = coalesce(
+    tostring(column_ifexists("transactionId_g", "")),
+    tostring(column_ifexists("transactionId_s", "")))
+| where TransactionID == "705875f8-6cfc-af4e-a675-d6a86db9cd8b"
+| project TimeGenerated, clientIp_s, requestUri_s,
+          action_s, ruleId_s, Message, TransactionID
+| sort by TimeGenerated asc
+
+// 8. Customer trace — POST requests received by App Service.
+// Observed /admin/create-user: 00:26:24.533 UTC, HTTP 302, 698 milliseconds.
+// CIp shows the original client in this lab; it alone does not prove the route.
+// Do not subtract gateway/App Service log timestamps to calculate latency.
+AppServiceHTTPLogs
+| where TimeGenerated between
+    (datetime(2026-09-28T00:20:00Z) .. datetime(2026-09-28T00:35:00Z))
+| where CsMethod == "POST"
+| project TimeGenerated, CIp, CsMethod, CsUriStem, ScStatus,
+          DurationMilliseconds = TimeTaken
+| sort by TimeGenerated asc
+
+// 9. Customer trace — Key Vault secret retrieval after the app restart.
+// Restart completed at 00:21:48 UTC. SecretGet was recorded at 00:23:00.861 UTC.
+// The identity resource path identifies the app. The URI names the secret;
+// this query does not return the secret value or the token-acquisition exchange.
+AzureDiagnostics
+| where TimeGenerated between
+    (datetime(2026-09-28T00:20:00Z) .. datetime(2026-09-28T00:35:00Z))
+| where ResourceType == "VAULTS"
+| where OperationName == "SecretGet"
+| project TimeGenerated, OperationName, ResultType,
+          ManagedIdentity = identity_claim_xms_mirid_s,
+          CallerIPAddress, requestUri_s
+| sort by TimeGenerated asc
+
+// 10. Customer trace — SQL audit records around account creation.
+// This workspace stores SQL events in AzureDiagnostics, not a separate
+// SQLSecurityAuditEvents table. EventTime uses the SQL event timestamp.
+// Observed session 56: one-row RPC at 00:26:24.403 UTC, then commit at
+// 00:26:24.504 UTC, from private client 10.1.3.62 using the app's database user.
+// The visible statement did not contain TRACE-VIP-0927 or an explicit INSERT.
+// Correlate this evidence with the gateway/App Service timestamps and dashboard.
+// Succeeded alone does not prove every operation completed: some audit actions
+// report permission-check success. Read the action and surrounding events too.
+AzureDiagnostics
+| where TimeGenerated between
+    (datetime(2026-09-28T00:20:00Z) .. datetime(2026-09-28T00:35:00Z))
+| where Category == "SQLSecurityAuditEvents"
+| extend EventTime = coalesce(event_time_t, TimeGenerated)
+| where EventTime between
+    (datetime(2026-09-28T00:26:20Z) .. datetime(2026-09-28T00:26:30Z))
+| project EventTime,
+    Action = action_name_s,
+    Database = database_name_s,
+    SqlLogin = server_principal_name_s,
+    DatabaseUser = database_principal_name_s,
+    ClientIP = client_ip_s,
+    SessionID = session_id_d,
+    Succeeded = succeeded_s,
+    AffectedRows = tolong(column_ifexists("affected_rows_d", real(null))),
+    Statement = statement_s
+| sort by EventTime asc
+
+// 11. Earlier bypass test — historical supporting evidence, NOT the customer trace.
+// The prior screenshot showed a denied request at 2026-09-25 20:45:40.975 UTC.
+// Keep this separate from the September 28 account-creation timeline.
+AppServiceIPSecAuditLogs
+| where TimeGenerated between
+    (datetime(2026-09-25T00:00:00Z) .. datetime(2026-09-29T00:00:00Z))
+| where Result =~ "Denied"
+| project TimeGenerated, CIp, Result, Details
+| sort by TimeGenerated desc
+
+// Hops 1, 5 and 7 are not KQL evidence in this lab:
+// Hop 1: no browser-to-edge telemetry was collected.
+// Hop 5: private DNS record and public-access checks provide structural evidence;
+//        they do not record the app's actual runtime DNS lookup.
+// Hop 7: the SQL database TDE page provides encryption-at-rest configuration.
+// Hop 8 reuses the gateway duration and the dashboard showing TRACE-VIP-0927.

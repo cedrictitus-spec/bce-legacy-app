@@ -2,11 +2,11 @@
 
 **Author:** Cedric Titus  
 **Project:** 4B — Detection and Monitoring  
-**Evidence reviewed:** September 27, 2026  
+**Evidence reviewed:** September 28, 2026  
 **Subscription:** Azure subscription 1  
 **Resource group:** `bce-zero-trust-rg`
 
-I collect security logs in one place, search them for suspicious activity, and use alert rules to flag events that need attention. I stopped `bce-appgw` after testing and verified that its operational state was **Stopped**. This document separates verified results from remaining evidence gaps.
+I collect security logs in one place, search them for suspicious activity, and use alert rules to flag events that need attention. I traced the creation of test customer `TRACE-VIP-0927` through the available logs and checked the app identity and private SQL access. After the trace, I verified `bce-appgw` was **Stopped** again on September 28. This document separates verified results from remaining evidence gaps.
 
 ## 1. Where my logs go
 
@@ -16,15 +16,15 @@ My central Log Analytics workspace is **`bce-security-logs` in East US**. Its ve
 |---|---|---|
 | Application Gateway `bce-appgw` | `ApplicationGatewayAccessLog` and `ApplicationGatewayFirewallLog` | Diagnostic setting `appgw-to-logs` sends logs to `bce-security-logs`; WAF events were queried in `AzureDiagnostics`. `ApplicationGatewayPerformanceLog` was not enabled. |
 | App Service `bce-flask-app-cedric-20260917` | `AppServiceHTTPLogs` and `AppServiceIPSecAuditLogs` | Both tables returned records in `bce-security-logs`: login requests and a denied direct-access attempt. |
-| Key Vault `bce-kv-8573` | `AuditEvent` | Key Vault events appeared in `AzureDiagnostics` in the central workspace. The captured `VaultGet` success demonstrates vault activity; it does not prove a secret retrieval. |
-| Primary SQL server `bce-sql-server-077b16c4c60a` / `club_security_db` | SQL auditing to Log Analytics, with `SQLSecurityAuditEvents` enabled | PowerShell confirmed auditing was enabled and directed to `bce-security-logs`. This configuration check alone does not prove a particular INSERT was captured. |
+| Key Vault `bce-kv-8573` | `AuditEvent` | A successful `SecretGet` at September 28, 00:23:00.8613877 UTC retrieved `sql-connection-passwordless`. The audit identity identifies the managed identity of `bce-flask-app-cedric-20260917`. The secret value is not included in this document. |
+| Primary SQL server `bce-sql-server-077b16c4c60a` / `club_security_db` | SQL auditing to Log Analytics, with `SQLSecurityAuditEvents` enabled | `AzureDiagnostics` returned SQL events for the app database user at the signup time, including an operation affecting one row and a completed commit in session 56. The literal INSERT and customer value are not visible in the captured statement text. |
 | Azure subscription activity | `Administrative` | Subscription diagnostic setting `activity-to-logs` routes events to `AzureActivity` in `bce-security-logs`. Successful tag and diagnostic-setting writes appeared. |
 
 The secondary SQL server is separate. Its Defender auditing recommendation is not evidence that primary-server auditing is disabled. Other App Service diagnostic categories have not been established by the evidence summarized here.
 
 ## 2. My five most useful KQL queries
 
-I run these in **bce-security-logs > Logs**. These examples use seven days so they include the September 25–27 lab evidence when run during the project; for later review I select the actual lab dates. A row records an event, not automatically a successful attack.
+I run these in **bce-security-logs > Logs**. These examples use seven days so they include the September 25–28 lab evidence when run during the project; for later review I select the actual lab dates. A row records an event, not automatically a successful attack.
 
 ### Query 1 — Which requests did the WAF block?
 
@@ -117,10 +117,27 @@ Naming these gaps helps me explain what my monitoring can and cannot prove.
 | Browser to internet edge | My Azure workspace does not observe the customer's device or the full connection before it reaches the gateway. | Limited visibility is acceptable for a lab, but the HTTP listener is not acceptable for real credentials in production. Add browser-to-gateway HTTPS and, where justified, client-side monitoring. |
 | Managed-identity token acquisition | Current workspace evidence does not show the app's internal token-acquisition exchange. | Accept this visibility limitation for the lab. Use Key Vault audit events to verify the consuming identity, and assess additional identity/platform telemetry for production. |
 | DNS resolution inside the VNet | A private DNS A record proves configuration, not every runtime lookup by the app. | Accept temporarily for the lab with private DNS configuration and connectivity checks. Consider resolver logging or targeted app diagnostics when troubleshooting or production requirements justify it. |
-| Missing named customer trace | I do not yet have a correlated gateway POST, App Service POST, startup SecretGet, and SQL audit event proving `TRACE-VIP-0927` across the observable stages. | Complete the evidence table in `CUSTOMER_JOURNEY.md` using real results. Do not reuse unrelated hunt timestamps as if they were one transaction. |
+| SQL statement detail and end-to-end request IDs | The trace links the signup by time, path, identity, SQL session, and the dashboard result. The captured SQL statement text does not expose the literal INSERT or `TRACE-VIP-0927`, and there is no shared request ID across every service. | Keep the correlation limits in `CUSTOMER_JOURNEY.md`. Add a safe application request ID and business-event log that links the customer action to the database operation without recording credentials or sensitive values. |
 | Alert email delivery | A verified address does not establish that an alert email arrived. | Resolve the action-group test error and capture the real alert email before marking notification testing complete. |
 
-My app's managed identity accesses **Key Vault**. The documented database connection still uses **SQL credentials stored in that vault**; I have not demonstrated passwordless managed-identity authentication to SQL. App Service's logged client IP may be the original caller, so I do not treat that field alone as proof of the network route. The private endpoint's network policies were disabled in the earlier network verification, so I do not claim the attached database NSG filters that endpoint.
+My app's managed identity accesses **Key Vault and Azure SQL**. Its verified application ID, `e3efe82f-4f86-4b7d-bd85-c6561d6c76ff`, matches the SQL audit login prefix; its separate service-principal object ID is `9f276e6a-dc78-428f-8d94-248f4dfd5156`. SQL records the database user as `bce-flask-app-cedric-20260917` and client address as `10.1.3.62`, within the app integration subnet. This replaces the earlier draft's assumption that this app still used a SQL password.
+
+On September 28 at about 13:19 Eastern, `Get-AzSqlServer` reported **PublicNetworkAccess: Disabled**. A lookup from my Mac returned the public address `20.40.228.130`, while the private DNS record maps the server to `10.1.2.4`. A connection attempt from my Mac using deliberately nonexistent test credentials was rejected with **"Connection was denied because Deny Public Network Access is set to Yes."** That explicit network-denial message confirms the public connection was blocked; it was not merely a wrong-password result. The private DNS record and this external check do not provide a log of the app's actual DNS lookup.
+
+App Service's HTTP log records the original client address `108.253.215.48`, so I do not treat that field alone as proof of the network route. The private endpoint's network policies were disabled in the earlier network verification, so I do not claim the attached database NSG filters that endpoint.
+
+### Customer trace evidence
+
+The dashboard shows `TRACE-VIP-0927` created on **September 28, 2026 at 00:26 UTC**. The startup secret retrieval at 00:23:00.8613877 UTC happened before the signup; I do not claim the app fetched the secret again for each customer request.
+
+| Recorded stage | Evidence | What it establishes |
+|---|---|---|
+| Gateway request | September 28, **00:26:24.000 UTC**; `/admin/create-user`; HTTP 302; `timeTaken` **0.762 seconds**; transaction `705875f8-6cfc-af4e-a675-d6a86db9cd8b` | The gateway handled the customer-creation request and returned a redirect. |
+| WAF evaluation | Same transaction ID and path; rule **920350**; **Matched**; “Host header is a numeric IP address”; log time **00:27:04.837 UTC** | The WAF recorded a rule match for this request. Matched is not Blocked, and the later log timestamp does not mean the WAF processed the request after SQL. |
+| App Service request | **00:26:24.533 UTC**; POST `/admin/create-user`; HTTP 302; **698 milliseconds** | The application handled the matching route and returned a redirect. |
+| SQL operation and commit | Session **56**; one-row RPC event at **00:26:24.403 UTC**, followed by **TRANSACTION COMMIT COMPLETED at 00:26:24.504 UTC**; database user is the app and client IP is `10.1.3.62` | The session records a one-row operation and commit at the signup time. Together with the dashboard, this supports the customer trace; the visible SQL statement does not independently identify the inserted customer. |
+
+These timestamps are recorded by different services. I use the gateway transaction ID to join gateway and WAF records, and time, path, app identity, SQL session, and the dashboard result for the other stages. I do not subtract different services' timestamps to claim an exact network delay.
 
 ## 5. Defender for Cloud triage
 
@@ -132,7 +149,7 @@ These are decisions and proposed actions, not a claim that the recommendations w
 |---|---|---|
 | Security contact, high-severity email, and owner email notifications | Agree. These are Defender notification settings, separate from my Azure Monitor action group. | No expected separate charge for changing the contact settings; about 10–20 minutes to configure and check. |
 | Secondary SQL auditing and Entra administrator | Agree; assess the secondary server separately from the primary before changing it. | Configuration effort about 20–45 minutes, plus any audit-log ingestion/storage. |
-| Entra-only authentication on either SQL server | Defer until clients and administrative access have been migrated and tested. The app still depends on SQL credentials. | About 1–3 hours or more for migration/testing; verify any related licensing or service costs. Enabling it prematurely could break access. |
+| Entra-only authentication on either SQL server | The app now demonstrates managed-identity authentication to the primary SQL server. Defer enforcing Entra-only authentication until other clients and administrative access are checked and tested; the app trace does not prove all clients have migrated. | About 1–3 hours or more to review remaining clients and test access; verify any related licensing or service costs. Enabling it prematurely could break an unreviewed client. |
 | Secondary SQL private endpoint and public-access removal | Agree with private access, but first confirm why the secondary is retained and what depends on it. | Private endpoint, data processing, and possibly DNS add ongoing cost; allow 30–90 minutes plus testing. |
 | Key Vault private access and firewall restrictions | Agree; defer until App Service connectivity and management access can be tested safely. | Firewall configuration itself has no separate expected fee; private endpoints and related services add cost. About 30–90 minutes. |
 | Key Vault deletion/purge protection | Agree for production; account for the lab's eventual teardown and retention constraints. | About 10–20 minutes to review and configure. Storage/service costs may continue during retained lifetime; protection cannot simply be switched off later. |
@@ -152,26 +169,25 @@ For Analytics tables, Microsoft includes 31 days of retention in the ingestion p
 
 ## 7. Actual spending and monthly monitoring estimate
 
-All figures below are **USD**, read from the September 27, 2026 screenshots. They are a dated snapshot, not final invoices.
+All figures below are **USD**. The latest cost screenshots were captured on **September 28, 2026**, scoped to **Azure subscription 1**, for **September 2026**, using **Actual cost**. Both requested groupings, Service name and Resource, are present. These figures are dated snapshots, not final invoices; the credit evidence remains dated September 27.
 
 | Item | Recorded value | Evidence and meaning |
 |---|---:|---|
-| September month-to-date actual cost | **$31.57** | Azure subscription 1 Overview; also matches the supplied Cost Analysis total. |
-| Most expensive individual resource | **bce-appgw — $23.12** | Subscription Overview, Costs by resource. |
-| September month-end forecast | **$35.80** | Subscription Overview and Cost Analysis. A forecast is an estimate, not a spending cap. |
-| Azure Monitor month-to-date actual | **$0.16** | Service breakdown in supplied Cost Analysis. It is a partial-month monitoring cost, not a full-month rate. |
+| September month-to-date actual cost | **$40.31** | September 28 subscription-scoped Cost Analysis, visible in both views. |
+| Most expensive individual resource | **bce-appgw; exact September 28 resource charge not displayed** | The resource chart identifies the gateway as the largest contributor. The last separately verified resource amount was **$23.12 on September 27**; it is not the current amount. A resource table or tooltip is needed for the latest exact charge. |
+| Application Gateway service total | **$30.70** | September 28 Service name breakdown. This is a service-level total, not an independently displayed resource-level amount. |
+| September month-end forecast | **$44.59** | September 28 Cost Analysis. A forecast is an estimate, not a spending cap. |
+| Azure Monitor month-to-date actual | **$0.30** | September 28 Service name breakdown. It is a partial-month monitoring cost, not a full-month rate. |
 | Three alert rules, full-month estimate | **$4.50/month** | Each saved rule overview estimates $1.50/month; 3 × $1.50 = $4.50. This assumes unchanged configurations. |
 | Additional log ingestion/retention and other monitoring usage | **Not separately quantified from these screenshots** | Add any applicable usage charges to the alert estimate. The evidence does not support claiming these are zero. |
-| Remaining trial credit | **$168.43** | Subscription Overview banner. |
+| Trial credit in September 27 snapshot | **$168.43** | Subscription Overview banner captured September 27; not a verified September 28 balance. |
 | Credit expiry displayed | **“in 3 days”** | Shown on September 27: approximately September 30, 2026. The exact expiry date/time is not shown in this screenshot. |
 
-My current documented **monthly monitoring estimate is $4.50 for the alert rules, plus applicable log and notification charges**. My measured monitoring spend so far is $0.16. Because the rules were created recently and I have not measured a stable monthly log volume, I do not extrapolate that partial-month amount into a misleading full-month total. For a firmer estimate I will review the workspace's Usage and estimated costs and Azure Monitor/Log Analytics billing meters at the same subscription scope.
+My current documented **monthly monitoring estimate is $4.50 for the alert rules, plus applicable log and notification charges**. My measured Azure Monitor spend so far is $0.30. Because the rules were created recently and I have not measured a stable monthly log volume, I do not extrapolate that partial-month amount into a misleading full-month total. For a firmer estimate I will review the workspace's Usage and estimated costs and Azure Monitor/Log Analytics billing meters at the same subscription scope.
 
-The service chart lists Application Gateway at $23.11 while the subscription resource card lists `bce-appgw` at $23.12. I use the resource card for the most-expensive-resource figure and preserve the displayed values rather than silently changing one.
+Other visible September 28 service totals are **SQL Database $5.75**, **Azure App Service $1.87**, and **Virtual Network $1.61**. The service and resource charts now meet the requested subscription scope. To finish recording the three requested headline amounts, I still need the exact current cost beside `bce-appgw` in a resource table or tooltip; I will not substitute the service card without verifying it.
 
-**Evidence correction still needed:** The supplied cost charts are scoped to the billing account “Cedric Titus.” The professor asked for subscription scope. I need to replace the two charts with September actual-cost views scoped to **Azure subscription 1**, grouped first by Service name and then by Resource. The subscription Overview already supports the three headline figures above.
-
-**Shutdown:** PowerShell returned `bce-appgw`, `bce-zero-trust-rg`, **Stopped**. Stopping the gateway stops its gateway billing, but other resources, including its separately billed public IP, may continue to incur charges. I will start the gateway only for further testing or the presentation, then stop and verify it again.
+**Shutdown:** After restarting the environment for the customer trace, I stopped the gateway again. PowerShell showed `bce-appgw` with operational state **Stopped** in the screenshot captured September 28 at about 13:16 Eastern; the exact stop-completion second was not recorded. Stopping the gateway stops its gateway billing, but other resources, including its separately billed public IP, may continue to incur charges. I will start the gateway only for further testing or the presentation, then stop and verify it again. The September 28 cost snapshot was captured after the shutdown check, but it is not a verified final bill for all gateway usage through shutdown.
 
 **Credit follow-up:** I need to post the verified credit-expiry information in the class Discord. If only the relative banner is available, I will report its exact wording and capture date and label September 30 as approximate, rather than claiming an exact expiry time.
 
@@ -179,13 +195,23 @@ The service chart lists Application Gateway at $23.11 while the subscription res
 
 My planned Step 9 submission has five screenshots:
 
-1. `Step9_Gateway_Stopped.png` — verified Stopped.
-2. `Step9_Cost_By_Service.png` — replace with subscription-scoped view.
-3. `Step9_Cost_by_Resource.png` — replace with subscription-scoped view.
+1. `Step9_Gateway_Stopped.png` — replace the earlier shutdown image with the September 28 verification after the customer trace.
+2. `Step9_Cost_By_Service.png` — September 28 subscription-scoped view showing $40.31 actual cost and $44.59 forecast.
+3. `Step9_Cost_by_Resource.png` — subscription-scoped resource view; use a table or tooltip that also shows the exact `bce-appgw` cost.
 4. `Step9_Credit_Expiry.png` — balance and three-day expiry warning visible.
 5. `Step9_Detection_And_Monitoring.png` — capture the completed document in VS Code preview.
 
-I still need to complete the real transaction timeline in `CUSTOMER_JOURNEY.md`, save both Markdown files in `bce-legacy-app`, commit and push those two files, and attach the evidence/repository link in Jira. A list of screenshot filenames is an index; it is not the monitoring documentation itself. The customer-trace side project has its own evidence requirements beyond these five Step 9 screenshots.
+The customer trace now has evidence for the observable application stages, with its limits recorded above and in `CUSTOMER_JOURNEY.md`. The remaining submission work is to record the exact latest `bce-appgw` resource charge, save the revised Markdown files and KQL queries in `bce-legacy-app`, capture the two document previews, commit and push the revisions, and attach the evidence and repository link in Jira. Earlier drafts were already pushed; they need these trace updates. A list of screenshot filenames is an index; it is not the monitoring documentation itself. The customer-trace side project has its own evidence requirements beyond these five Step 9 screenshots.
+
+## Reflection
+
+I expect a blocked web attack to leave a source IP, requested path, WAF rule, and timestamp in the gateway logs. I would use my blocked-request query to inspect those records and the WAF burst alert to flag repeated blocked requests from one IP. I would check the Key Vault access-denied alert if someone tried to read a secret without permission. I would use the role-assignment alert to investigate an unexpected grant of Azure access. I could miss repeated wrong passwords in the application because its HTTP logs do not clearly record whether each login succeeded or failed. I would close that gap by adding safe application login events and testing an alert against repeated failures.
+
+## Break-glass log
+
+On **September 28, 2026 at about 13:19 Eastern**, I verified that the primary SQL server's public network access was **Disabled**, and the connection test explicitly reported that public access was denied. The final check used read-only configuration and DNS commands plus a connection attempt with nonexistent test credentials; it did not change Azure configuration or enable public SQL access.
+
+**Historical status: unknown.** On September 28, I could not confirm whether I temporarily re-enabled SQL public access earlier in the project. I therefore cannot provide reliable enable/disable times or a reason for a past exception, and I do not claim that no exception occurred. The verified current state is Disabled, with the external connection blocked. This is a gap in my change record; future emergency access changes should record the reason, approval, start time, and restoration time when they happen.
 
 ## Technical references
 
