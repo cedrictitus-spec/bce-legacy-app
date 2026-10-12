@@ -1,7 +1,7 @@
 # Access Review - BCE Club Security Migration
 $ErrorActionPreference = "Stop"
 
-$expectedSubscriptionId = "REDACTED"
+$expectedSubscriptionId = Read-Host "Enter the subscription ID to review"
 $context = Get-AzContext
 
 if (-not $context -or -not $context.Subscription) {
