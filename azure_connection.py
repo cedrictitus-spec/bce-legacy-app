@@ -6,10 +6,10 @@ The connection secret and the URL returned by this module must not be logged.
 """
 
 import argparse
+import os
 import re
 
-TENANT_ID = "REDACTED"
-SUBSCRIPTION_ID = "REDACTED"
+TENANT_ID = os.getenv("AZURE_TENANT_ID", "")
 VAULT_NAME = "bce-kv-8573"
 VAULT_URL = f"https://{VAULT_NAME}.vault.azure.net"
 SECRET_NAME = "database-connection-string"
