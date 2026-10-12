@@ -1,28 +1,46 @@
-from app import app, db, User
+"""Create demo accounts only in an empty lab database."""
 
-with app.app_context():
-    db.create_all()
+import sys
+import warnings
+from getpass import GetPassWarning, getpass
 
-    # Clear existing users
-    User.query.delete()
 
-    # Create demo users
-    admin = User(username='admin', role='admin')
-    admin.set_password('REDACTED')
+def main():
+    if not sys.stdin.isatty():
+        raise SystemExit("Run this script in an interactive terminal.")
+    warnings.simplefilter("error", GetPassWarning)
 
-    user1 = User(username='security_manager', role='manager')
-    user1.set_password('REDACTED')
+    from app import app, db, User
 
-    user2 = User(username='staff', role='user')
-    user2.set_password('REDACTED')
+    with app.app_context():
+        db.create_all()
+        if User.query.first() is not None:
+            raise SystemExit("Stopped: users already exist. No users were changed.")
 
-    db.session.add(admin)
-    db.session.add(user1)
-    db.session.add(user2)
-    db.session.commit()
+        users = []
+        for username, role in (
+            ("admin", "admin"),
+            ("security_manager", "manager"),
+            ("staff", "user"),
+        ):
+            password = getpass(f"New password for {username}: ")
+            confirmation = getpass("Confirm password: ")
+            if not password or password != confirmation:
+                raise SystemExit("Passwords must be nonempty and match. No users were added.")
 
-    print("Database initialized with demo users:")
-    print(" - admin / REDACTED")
-    print(" - security_manager / REDACTED")
-    print(" - staff / REDACTED")
-    
+            user = User(username=username, role=role)
+            user.set_password(password)
+            users.append(user)
+
+        try:
+            db.session.add_all(users)
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            raise SystemExit("Could not create demo users. Changes were rolled back.") from None
+
+        print("Created admin, security_manager, and staff. Passwords are not displayed.")
+
+
+if __name__ == "__main__":
+    main()
